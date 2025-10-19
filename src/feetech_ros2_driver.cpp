@@ -28,15 +28,29 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
   }
   auto serial_port = std::make_unique<feetech_driver::SerialPort>(usb_port_it->second);
 
+  const bool skip_probe = [&]() {
+    const auto it = info_.hardware_parameters.find("skip_probe");
+    if (it == info_.hardware_parameters.end()) return false;
+    const auto& v = it->second;
+    return v == "1" || v == "true" || v == "True" || v == "TRUE";
+  }();
+
   if (const auto result = serial_port->configure(); !result) {
     spdlog::error("FeetechHardware::on_init -> {}", result.error());
-    return CallbackReturn::ERROR;
+    if (!skip_probe) {
+      return CallbackReturn::ERROR;
+    }
+    spdlog::warn("FeetechHardware::on_init proceeding in skip_probe mode despite serial error");
   }
 
   communication_protocol_ = std::make_unique<feetech_driver::CommunicationProtocol>(std::move(serial_port));
 
   joint_ids_.resize(info_.joints.size(), 0);
   joint_offsets_.resize(info_.joints.size(), 0);
+  last_raw_ticks_.resize(info_.joints.size(), 0);
+  joint_min_ticks_.resize(info_.joints.size(), 0);
+  joint_max_ticks_.resize(info_.joints.size(), 4095);
+  home_rads_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     const auto& joint_params = info_.joints[i].parameters;
@@ -49,15 +63,39 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
       return 0;
     }();
 
-    for (const auto& [parameter_name, address] : {std::pair{"p_cofficient", SMS_STS_P_COEF},
-                                                  {"d_cofficient", SMS_STS_D_COEF},
-                                                  {"i_cofficient", SMS_STS_I_COEF}}) {
-      if (const auto param_it = joint_params.find(parameter_name); param_it != joint_params.end()) {
-        const auto result = communication_protocol_->write(
-            joint_ids_[i], address, std::experimental::make_array(static_cast<uint8_t>(std::stoi(param_it->second))));
-        if (!result) {
-          spdlog::error("FeetechHardwareInterface::on_init -> {}", result.error());
-          return CallbackReturn::ERROR;
+    if (const auto rmin_it = joint_params.find("range_min"); rmin_it != joint_params.end()) {
+      try {
+        joint_min_ticks_[i] = std::stoi(rmin_it->second);
+      } catch (...) {
+      }
+    }
+    if (const auto rmax_it = joint_params.find("range_max"); rmax_it != joint_params.end()) {
+      try {
+        joint_max_ticks_[i] = std::stoi(rmax_it->second);
+      } catch (...) {
+      }
+    }
+
+    if (const auto home_it = joint_params.find("home_rad"); home_it != joint_params.end()) {
+      try {
+        home_rads_[i] = std::stod(home_it->second);
+      } catch (...) {
+        home_rads_[i] = std::numeric_limits<double>::quiet_NaN();
+      }
+    }
+
+    if (!skip_probe) {
+      for (const auto& [parameter_name, address] : {std::pair{"p_cofficient", SMS_STS_P_COEF},
+                                                    {"d_cofficient", SMS_STS_D_COEF},
+                                                    {"i_cofficient", SMS_STS_I_COEF}}) {
+        if (const auto param_it = joint_params.find(parameter_name); param_it != joint_params.end()) {
+          const auto result = communication_protocol_->write(
+              joint_ids_[i], address,
+              std::experimental::make_array(static_cast<uint8_t>(std::stoi(param_it->second))));
+          if (!result) {
+            spdlog::error("FeetechHardwareInterface::on_init -> {}", result.error());
+            return CallbackReturn::ERROR;
+          }
         }
       }
     }
@@ -67,25 +105,39 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
     }
   }
 
-  const auto joint_model_series = joint_ids_ | ranges::views::transform([&](const auto id) {
-                                    return communication_protocol_->read_model_number(id)
-                                        .and_then(feetech_driver::get_model_name)
-                                        .and_then(feetech_driver::get_model_series);
-                                  });
-
-  if (std::ranges::any_of(joint_model_series, [](const auto& series) { return !series.has_value(); })) {
-    spdlog::error("FeetechHardware::on_init [One of the joints has an error]. Input: {}",
-                  ranges::views::zip(joint_ids_, joint_model_series));
-    return CallbackReturn::ERROR;
+  // Optional: auto zero offsets on activate
+  if (const auto it = info_.hardware_parameters.find("auto_zero_on_activate"); it != info_.hardware_parameters.end()) {
+    const auto& v = it->second;
+    auto_zero_on_activate_ = (v == "1" || v == "true" || v == "True" || v == "TRUE");
+  }
+  if (const auto it = info_.hardware_parameters.find("apply_home_on_activate"); it != info_.hardware_parameters.end()) {
+    const auto& v = it->second;
+    apply_home_on_activate_ = (v == "1" || v == "true" || v == "True" || v == "TRUE");
   }
 
-  const auto js = joint_model_series | ranges::views::transform([](const auto& series) { return series.value(); });
+  if (!skip_probe) {
+    const auto joint_model_series = joint_ids_ | ranges::views::transform([&](const auto id) {
+                                      return communication_protocol_->read_model_number(id)
+                                          .and_then(feetech_driver::get_model_name)
+                                          .and_then(feetech_driver::get_model_series);
+                                    });
 
-  // TODO: Support other series
-  if (ranges::any_of(js, [](const auto& series) { return series != feetech_driver::ModelSeries::kSts; })) {
-    spdlog::error("FeetechHardware::on_init [Only STS series is supported]. Input (id, series): {}",
-                  ranges::views::zip(joint_ids_, js));
-    return CallbackReturn::ERROR;
+    if (std::ranges::any_of(joint_model_series, [](const auto& series) { return !series.has_value(); })) {
+      spdlog::error("FeetechHardware::on_init [One of the joints has an error]. Input: {}",
+                    ranges::views::zip(joint_ids_, joint_model_series));
+      return CallbackReturn::ERROR;
+    }
+
+    const auto js = joint_model_series | ranges::views::transform([](const auto& series) { return series.value(); });
+
+    // TODO: Support other series
+    if (ranges::any_of(js, [](const auto& series) { return series != feetech_driver::ModelSeries::kSts; })) {
+      spdlog::error("FeetechHardware::on_init [Only STS series is supported]. Input (id, series): {}",
+                    ranges::views::zip(joint_ids_, js));
+      return CallbackReturn::ERROR;
+    }
+  } else {
+    spdlog::warn("FeetechHardware::on_init skipping model probing and series check (skip_probe=true)");
   }
 
   return CallbackReturn::SUCCESS;
@@ -126,11 +178,18 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
   }
   ranges::for_each(data | ranges::views::enumerate, [&](const auto& values) {
     const auto& [index, readings] = values;
-    state_hw_positions_[index] = feetech_driver::to_radians(
-        feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[0], .high = readings[1]}) -
-        joint_offsets_[index]);
-    state_hw_velocities_[index] = feetech_driver::to_radians(
-        feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[2], .high = readings[3]}));
+    const int raw_ticks = feetech_driver::from_sts(
+        feetech_driver::WordBytes{.low = readings[0], .high = readings[1]});
+    last_raw_ticks_[index] = raw_ticks;
+    // Relative ticks around zero using calibration offset
+    int delta = raw_ticks - joint_offsets_[index];
+    // Normalize to [-2048, 2048)
+    delta = ((delta + 2048) % 4096 + 4096) % 4096 - 2048;
+    state_hw_positions_[index] = feetech_driver::to_radians(delta);
+
+    const int raw_speed = feetech_driver::from_sts(
+        feetech_driver::WordBytes{.low = readings[2], .high = readings[3]});
+    state_hw_velocities_[index] = feetech_driver::to_radians(raw_speed);
   });
   return hardware_interface::return_type::OK;
 }
@@ -147,7 +206,19 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
     // Only include joints with command interfaces
     if (!info_.joints[i].command_interfaces.empty()) {
       commanded_joint_ids.push_back(joint_ids_[i]);
-      commanded_positions.push_back(feetech_driver::from_radians(hw_positions_[i]) + joint_offsets_[i]);
+      int rel_ticks = feetech_driver::from_radians(hw_positions_[i]);
+      // Normalize relative ticks to [-2048, 2048)
+      rel_ticks = ((rel_ticks + 2048) % 4096 + 4096) % 4096 - 2048;
+      // Convert to absolute ticks in [0, 4096)
+      int abs_ticks = (rel_ticks + joint_offsets_[i]) % 4096;
+      if (abs_ticks < 0) abs_ticks += 4096;
+      // Clamp to calibrated ticks range if provided
+      const int rmin = joint_min_ticks_[i];
+      const int rmax = joint_max_ticks_[i];
+      if (rmin <= rmax) {
+        abs_ticks = std::clamp(abs_ticks, rmin, rmax);
+      }
+      commanded_positions.push_back(abs_ticks);
       commanded_speeds.push_back(2400);       // Default speed
       commanded_accelerations.push_back(50);  // Default acceleration
     }
@@ -167,8 +238,32 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
 }
 
 CallbackReturn FeetechHardwareInterface::on_activate(const rclcpp_lifecycle::State& /* previous_state */) {
-  // Time/Duration are not used
+  // Initial read
   read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0));
+
+  // If requested, set offsets so that current position becomes zero
+  if (auto_zero_on_activate_) {
+    for (size_t i = 0; i < joint_offsets_.size(); ++i) {
+      joint_offsets_[i] = last_raw_ticks_[i];
+    }
+    spdlog::info("Auto-zero: joint offsets set to raw ticks: {}",
+                 fmt::join(joint_offsets_, ", "));
+    // Recompute state with new offsets
+    read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0));
+  }
+
+  if (apply_home_on_activate_) {
+    for (size_t i = 0; i < joint_offsets_.size(); ++i) {
+      if (!std::isnan(home_rads_[i])) {
+        const int home_ticks = feetech_driver::from_radians(home_rads_[i]);
+        joint_offsets_[i] = last_raw_ticks_[i] - home_ticks;
+      }
+    }
+    spdlog::info("Apply-home: joint offsets set for home_rad: {}",
+                 fmt::join(joint_offsets_, ", "));
+    read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0));
+  }
+
   // Set the initial command to current joint positions
   hw_positions_ = state_hw_positions_;
   return CallbackReturn::SUCCESS;

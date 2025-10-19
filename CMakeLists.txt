@@ -30,6 +30,8 @@ find_package(fmt REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(range-v3 REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 
@@ -55,6 +57,15 @@ install(
   ARCHIVE DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
+
+# Calibration tool node
+add_executable(feetech_calibration_node src/feetech_calibration_node.cpp)
+target_include_directories(
+  feetech_calibration_node PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                                  $<INSTALL_INTERFACE:include>)
+target_link_libraries(feetech_calibration_node communication_protocol serial_port)
+ament_target_dependencies(feetech_calibration_node rclcpp sensor_msgs std_srvs)
+install(TARGETS feetech_calibration_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(${PROJECT_NAME}Targets HAS_LIBRARY_TARGET)
 ament_export_dependencies(rclcpp hardware_interface pluginlib)

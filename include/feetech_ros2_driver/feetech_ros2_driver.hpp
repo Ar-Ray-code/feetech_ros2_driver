@@ -30,14 +30,21 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
 
  private:
-  std::unique_ptr<feetech_driver::CommunicationProtocol> communication_protocol_;
+ std::unique_ptr<feetech_driver::CommunicationProtocol> communication_protocol_;
 
   std::vector<double> hw_positions_;
   std::vector<double> state_hw_positions_;
   std::vector<double> state_hw_velocities_;
   std::vector<uint8_t> previous_hw_positions_;
+  std::vector<int> last_raw_ticks_;
+  std::vector<int> joint_min_ticks_;
+  std::vector<int> joint_max_ticks_;
 
   std::vector<uint8_t> joint_ids_;
   std::vector<int> joint_offsets_;
+
+  bool auto_zero_on_activate_ = false;
+  bool apply_home_on_activate_ = false;
+  std::vector<double> home_rads_;
 };
 }  // namespace feetech_ros2_driver
