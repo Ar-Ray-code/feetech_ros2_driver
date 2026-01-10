@@ -55,6 +55,7 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
 
   bool auto_zero_on_activate_ = false;
   bool apply_home_on_activate_ = false;
+  bool disable_position_control_ = false;
   std::vector<double> home_rads_;
 };
 }  // namespace feetech_ros2_driver

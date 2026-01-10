@@ -119,6 +119,10 @@ CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::Hardw
     const auto& v = it->second;
     apply_home_on_activate_ = (v == "1" || v == "true" || v == "True" || v == "TRUE");
   }
+  if (const auto it = info_.hardware_parameters.find("disable_position_control"); it != info_.hardware_parameters.end()) {
+    const auto& v = it->second;
+    disable_position_control_ = (v == "1" || v == "true" || v == "True" || v == "TRUE");
+  }
 
   if (!skip_probe) {
     const auto joint_model_series = joint_ids_ | ranges::views::transform([&](const auto id) {
@@ -201,6 +205,11 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
 
 hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Time& /* time */,
                                                                 const rclcpp::Duration& /* period */) {
+  // Skip write if position control is disabled (leader mode)
+  if (disable_position_control_) {
+    return hardware_interface::return_type::OK;
+  }
+
   // Create vectors only for joints that have command interfaces
   std::vector<uint8_t> commanded_joint_ids;
   std::vector<int> commanded_positions;
@@ -267,6 +276,14 @@ CallbackReturn FeetechHardwareInterface::on_activate(const rclcpp_lifecycle::Sta
     spdlog::info("Apply-home: joint offsets set for home_rad: {}",
                  fmt::join(joint_offsets_, ", "));
     read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0));
+  }
+
+  // Disable torque if position control is disabled (for leader arm)
+  if (disable_position_control_) {
+    for (auto id : joint_ids_) {
+      communication_protocol_->set_torque(id, false);
+    }
+    spdlog::info("Position control disabled: torque off for all joints (leader mode)");
   }
 
   // Set the initial command to current joint positions
