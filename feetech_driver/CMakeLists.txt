@@ -16,6 +16,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(BUILD_FEETECH_DRIVER_DEMO "Build the feetech_driver demo executable" ON)
 
 find_package(tl-expected QUIET)
 if(NOT tl-expected_FOUND)
@@ -77,9 +78,11 @@ set_target_properties(
   communication_protocol PROPERTIES VERSION ${${PROJECT_NAME}_VERSION}
                                     SOVERSION ${CPACK_PACKAGE_VERSION_MAJOR})
 
-add_executable(demo examples/demo.cpp)
-target_compile_features(demo PRIVATE cxx_std_20)
-target_link_libraries(demo serial_port communication_protocol)
+if(BUILD_FEETECH_DRIVER_DEMO)
+  add_executable(demo examples/demo.cpp)
+  target_compile_features(demo PRIVATE cxx_std_20)
+  target_link_libraries(demo serial_port communication_protocol)
+endif()
 
 include(CMakePackageConfigHelpers)
 # Generate the version, config and target files into the build directory.
@@ -101,7 +104,9 @@ install(
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
-install(TARGETS demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(BUILD_FEETECH_DRIVER_DEMO)
+  install(TARGETS demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 # Use a namespace because CMake provides better diagnostics for namespaced
 # imported targets.
